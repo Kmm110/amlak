@@ -15,6 +15,33 @@ const DEF_TIERS = {
   gold: { name: 'طلایی', daily: 30, weekly: 180, every: 20, prices: { m1: 12e6, m3: 33e6, m6: 60e6, m12: 110e6 } },
   platinum: { name: 'پلاتینی', daily: 0, weekly: 0, every: 5, prices: { m1: 20e6, m3: 57e6, m6: 110e6, m12: 200e6 } } };
 const lim = n => +n > 0 ? +n : Infinity;
+/* کار گروهی روی فایل‌های دیوار (مشترک بین حالت واقعی و نمایشی).
+   op.del: حذف ردیف‌ها + پیش‌نویس مخفی‌شان (آگهی منتشرشده می‌ماند) و جلوگیری از اضافه شدن دوباره.
+   در غیر این صورت: status، agent_id، contact_phone ('' یعنی پاک کردن)، note، publish روی آگهی وصل‌شده. */
+function bulkApply(d, ids, op, by) {
+  const set = new Set(ids), rows = (d.divar || []).filter(x => set.has(x.id)), t = new Date().toISOString(), res = { rows: rows.length, published: 0, deleted: 0, skipped: 0 };
+  const L = id => d.listings.find(l => l.id === id);
+  if (op.del) {
+    const drop = new Set(rows.map(x => x.listing_id).filter(id => L(id)?.status === 'hidden'));
+    d.listings = d.listings.filter(l => !drop.has(l.id));
+    if (Array.isArray(d.priv)) d.priv = d.priv.filter(p => !drop.has(p.listing_id)); else if (d.priv) drop.forEach(id => { delete d.priv[id]; });
+    d.divar = d.divar.filter(x => !set.has(x.id));
+    const toks = rows.map(x => Divar.tokenOf(x.url)).filter(Boolean);
+    d.divarIgnore = [...toks, ...(d.divarIgnore || []).filter(k => !toks.includes(k))].slice(0, 3000);
+    res.deleted = rows.length; res.drafts = drop.size; return res;
+  }
+  for (const x of rows) {
+    if (op.status) Object.assign(x, { status: op.status, by_status: by, at_status: t });
+    if (op.note) x.note = [x.note, op.note].filter(Boolean).join(' · ');
+    const l = x.listing_id && L(x.listing_id);
+    if (!l) { if (op.publish || op.agent_id || op.contact_phone != null) res.skipped++; continue; }
+    if (op.agent_id) l.agent_id = op.agent_id;
+    if (op.contact_phone != null) { if (op.contact_phone) l.contact_phone = op.contact_phone; else delete l.contact_phone; }
+    if (op.publish && l.status === 'hidden') { l.status = 'active'; x.status = 'listed'; Object.assign(x, { by_status: by, at_status: t }); res.published++; }
+    l.updated_at = t;
+  }
+  return res;
+}
 // شمارش آگهی‌های دیوار: { 'YYYY-MM-DD': n } فقط ۷ روز اخیر
 const last7 = () => Array.from({ length: 7 }, (_, i) => dayKey(Date.now() - i * 864e5));
 const weekSum = days => last7().reduce((s, k) => s + (+(days || {})[k] || 0), 0);
@@ -70,6 +97,7 @@ const ROLES = { admin: 'ادمین', agent: 'مشاور', pending: 'در انت�
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fa = n => n == null || n === '' ? '' : Number(n).toLocaleString('fa-IR');
 const faStr = s => String(s ?? '').replace(/\d/g, d => '۰۱۲۳۴۵۶۷۸۹'[d]);
+const toEnDigits = s => String(s ?? '').replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
 const toNum = s => { const t = String(s ?? '').replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[^\d]/g, ''); return t ? Number(t) : null; };
 function money(n, unit = true) {
   if (n == null || n === '') return '—';
@@ -561,6 +589,11 @@ function GitHubDB() {
       }, 'فایل دیوار', false));
     },
     async divarUpdate(id, patch) { if (!staff()) deny(); await mutate(d => { const x = (d.divar || []).find(y => y.id === id); if (x) Object.assign(x, patch, { by_status: dev.uid, at_status: new Date().toISOString() }); }, 'فایل دیوار', false); },
+    // کار گروهی روی چند فایل دیوار در یک ذخیره: حذف، یا وضعیت/مشاور/شماره تماس/یادداشت/انتشار
+    async divarBulk(ids, op) {
+      if (!admin()) deny();
+      return mutate(d => bulkApply(d, ids, op, dev.uid), op.del ? 'حذف گروهی فایل‌های دیوار' : 'ویرایش گروهی فایل‌های دیوار', true);
+    },
     async divarDelete(id) { await mutate(d => { const x = (d.divar || []).find(y => y.id === id); if (!x) return; if (!admin() && x.by !== dev.uid) deny(); d.divar = d.divar.filter(y => y.id !== id);
       const tok = Divar.tokenOf(x.url); if (tok) d.divarIgnore = [tok, ...(d.divarIgnore || []).filter(t => t !== tok)].slice(0, 3000); }, 'حذف فایل دیوار', false); },   // حذف‌شده‌ها دوباره خودکار اضافه نشوند
     async divarSaveSearches(list) { if (!admin() || TENANT !== 'main') deny(); await mutate(d => { d.divarSearches = list; }, 'جستجوهای دیوار', false); },
@@ -746,6 +779,7 @@ function DemoDB() {
       if (tok && D.divar.some(y => Divar.tokenOf(y.url) === tok)) throw new Error('این آگهی قبلا در فهرست هست');
       const n = { ...x, id: 'dv' + (++D.seq), by: uid, at: new Date().toISOString(), status: 'new' }; D.divar.unshift(n); save(); return clone(n);
     },
+    async divarBulk(ids, op) { if (!isAdmin()) deny(); const r = bulkApply(D, ids, op, uid); save(); return r; },
     async divarUpdate(id, patch) { const x = (D.divar || []).find(y => y.id === id); if (x) { Object.assign(x, patch); save(); } },
     async divarDelete(id) { const x = (D.divar || []).find(y => y.id === id); if (x && !isAdmin() && x.by !== uid) deny(); D.divar = (D.divar || []).filter(y => y.id !== id); if (x) D.divarIgnore = [Divar.tokenOf(x.url), ...(D.divarIgnore || [])]; save(); },
     async divarImport(x, l, pv) {
@@ -995,7 +1029,7 @@ async function viewListing(id) {
   </div>
   <aside class="stack">
     ${edit ? `<div class="card row"><b style="flex:1">مدیریت آگهی</b><a class="btn sm primary" href="#edit/${l.id}">ویرایش</a></div>` : ''}
-    <div class="card">${!DB.caps.leads ? '<h3 style="margin-bottom:8px">درخواست بازدید یا مشاوره</h3>' : ''}${agentCard(a, true, `سلام، درباره آگهی کد ${fa(l.id)} («${l.title}») سوال دارم و برای بازدید وقت می‌خواهم.\n${location.href}`)}</div>
+    <div class="card">${!DB.caps.leads ? '<h3 style="margin-bottom:8px">درخواست بازدید یا مشاوره</h3>' : ''}${agentCard(a && l.contact_phone ? { ...a, phone: l.contact_phone } : a, true, `سلام، درباره آگهی کد ${fa(l.id)} («${l.title}») سوال دارم و برای بازدید وقت می‌خواهم.\n${location.href}`)}</div>
     ${DB.caps.leads && ['active', 'reserved'].includes(l.status) ? `<form class="card stack" id="lead"><h3>درخواست بازدید یا مشاوره</h3>
       <p class="muted small" style="margin:0">مشاور این ملک با شما تماس می‌گیرد.</p>
       <input name="name" required minlength="2" maxlength="80" placeholder="نام شما" autocomplete="name">
@@ -1571,10 +1605,45 @@ async function panelDivar(pt) {
       <p class="small muted" style="margin:0">در دیوار فیلترها را بزنید (مثلا «آگهی‌دهنده: شخصی»)، لینک صفحه را کپی کنید و اینجا ذخیره کنید تا همه مشاوران با یک لمس باز کنند.</p>` : ''}</div>` : ''}
     <div class="row" style="margin:14px 0 8px"><h3 style="flex:1">فهرست (${fa(items.length)})</h3>
       <select id="dvs" ${sel}>${opts([['open', 'باز (جدید و تماس گرفته)'], ['all', 'همه'], ...Object.entries(DIVAR_ST).map(([k, v]) => [k, v[0]])], F.st)}</select></div>
-    <div class="tbl" id="dvl"></div>`;
+    ${isAdmin() ? `<div class="card row" id="dvbar" style="position:sticky;top:0;z-index:5;margin-bottom:8px;padding:8px 12px;gap:8px">
+      <label class="check" style="flex:1"><input type="checkbox" id="dvall"> انتخاب همه <span class="small muted" id="dvcnt"></span></label>
+      <button class="btn sm" id="dvedit" disabled>✏️ ویرایش گروهی</button>
+      <button class="btn sm danger" id="dvdel" disabled>🗑 حذف انتخاب‌شده‌ها</button></div>` : ''}
+    <div class="tbl" id="dvl"></div>
+    <dialog id="dvdlg" style="max-width:460px;width:92%;border:none;border-radius:16px;padding:0;background:var(--card,#fff);color:inherit">
+      <form method="dialog" class="stack" id="dvbf" style="padding:16px">
+        <h3 style="margin:0">ویرایش گروهی <span class="small muted" id="dvbn"></span></h3>
+        <p class="small muted" style="margin:0">فقط چیزهایی که پر کنید عوض می‌شود؛ بقیه دست نمی‌خورد.</p>
+        <label class="f"><span>شماره تماس روی آگهی‌ها (به جای شماره مشاور نمایش داده می‌شود)</span><input name="phone" inputmode="tel" dir="ltr" placeholder="مثلا 09121234567"></label>
+        <label class="check small"><input type="checkbox" name="clearphone"> شماره مخصوص قبلی را پاک کن (دوباره شماره مشاور نمایش داده شود)</label>
+        <label class="f"><span>مشاور</span><select name="agent"><option value="">— بدون تغییر —</option>${agentsAll.map(a => `<option value="${esc(a.id)}">${esc(a.full_name)}</option>`).join('')}</select></label>
+        <label class="f"><span>وضعیت در فهرست دیوار</span><select name="status"><option value="">— بدون تغییر —</option>${Object.entries(DIVAR_ST).map(([k, v]) => `<option value="${k}">${v[0]}</option>`).join('')}</select></label>
+        <label class="f"><span>افزودن یادداشت</span><input name="note" placeholder="مثلا: با مالک تماس گرفته شد"></label>
+        <label class="check"><input type="checkbox" name="publish"> <b>همه پیش‌نویس‌ها منتشر شوند</b></label>
+        <div class="row"><button class="btn primary" value="ok" style="flex:1">اعمال روی همه انتخاب‌شده‌ها</button><button class="btn" value="cancel" formnovalidate>انصراف</button></div>
+      </form></dialog>`;
+  const SEL = S.dvSel || (S.dvSel = new Set());
+  [...SEL].forEach(id => { if (!items.some(x => x.id === id)) SEL.delete(id); });
+  const visible = () => items.filter(x => F.st === 'all' || (F.st === 'open' ? ['new', 'called'].includes(x.status) : x.status === F.st));
+  const syncBar = () => {
+    if (!$('#dvbar')) return; const v = visible(), n = v.filter(x => SEL.has(x.id)).length;
+    $('#dvcnt').textContent = n ? `(${fa(n)} از ${fa(v.length)} انتخاب شده)` : `(${fa(v.length)} مورد)`;
+    $('#dvall').checked = !!v.length && n === v.length; $('#dvall').indeterminate = n > 0 && n < v.length;
+    $('#dvedit').disabled = $('#dvdel').disabled = !n;
+  };
+  const chosen = () => visible().filter(x => SEL.has(x.id)).map(x => x.id);
+  const runBulk = async (op, btn) => {
+    const ids = chosen(); if (!ids.length) return;
+    btn && (btn.disabled = true);
+    try {
+      const r = await DB.divarBulk(ids, op); SEL.clear(); S.listings = null;
+      toast(op.del ? `${fa(r.deleted)} مورد حذف شد${r.drafts ? ` (و ${fa(r.drafts)} پیش‌نویس)` : ''}` : `${fa(r.rows)} مورد ویرایش شد${r.published ? ` · ${fa(r.published)} آگهی منتشر شد` : ''}${r.skipped ? ` · ${fa(r.skipped)} مورد آگهی وصل‌شده نداشت` : ''}`, 4000);
+      viewPanel('divar', true);
+    } catch (e) { toast(e.message, 5000); btn && (btn.disabled = false); }
+  };
   const draw = () => {
-    const r = items.filter(x => F.st === 'all' || (F.st === 'open' ? ['new', 'called'].includes(x.status) : x.status === F.st));
-    $('#dvl').innerHTML = r.length ? r.map(x => `<div class="tr" style="align-items:flex-start"><div class="mid">
+    const r = visible();
+    $('#dvl').innerHTML = r.length ? r.map(x => `<div class="tr" style="align-items:flex-start">${isAdmin() ? `<input type="checkbox" data-ck="${x.id}" ${SEL.has(x.id) ? 'checked' : ''} style="width:22px;height:22px;margin-top:4px;flex:none" aria-label="انتخاب">` : ''}<div class="mid">
       <div class="row"><b style="flex:1;white-space:normal">${esc(x.title || 'آگهی دیوار')}</b><span class="tag ${DIVAR_ST[x.status]?.[1] || ''}">${DIVAR_ST[x.status]?.[0] || ''}</span></div>
       ${summary(x.parsed) ? `<div class="small">${esc(summary(x.parsed))}</div>` : ''}
       ${x.note ? `<div class="small muted">📝 ${esc(x.note)}</div>` : ''}
@@ -1600,8 +1669,32 @@ async function panelDivar(pt) {
       catch (e) { toast(e.message); b.disabled = false; }
     }));
     $$('[data-dd]').forEach(b => b.addEventListener('click', async () => { if (!confirm('از فهرست حذف شود؟')) return; try { await DB.divarDelete(b.dataset.dd); viewPanel('divar', true); } catch (e) { toast(e.message); } }));
+    $$('[data-ck]').forEach(c => c.addEventListener('change', () => { c.checked ? SEL.add(c.dataset.ck) : SEL.delete(c.dataset.ck); syncBar(); }));
+    syncBar();
   };
   $('#dvs').addEventListener('change', e => { F.st = e.target.value; draw(); });
+  if ($('#dvbar')) {
+    $('#dvall').addEventListener('change', e => { visible().forEach(x => e.target.checked ? SEL.add(x.id) : SEL.delete(x.id)); draw(); });
+    $('#dvdel').addEventListener('click', e => {
+      const ids = chosen(), withDraft = items.filter(x => ids.includes(x.id) && x.listing_id && lOf(x.listing_id)?.status === 'hidden').length;
+      if (confirm(`${fa(ids.length)} مورد از فهرست دیوار حذف شود؟${withDraft ? `\n${fa(withDraft)} پیش‌نویس مخفی آن‌ها هم پاک می‌شود.` : ''}\nآگهی‌های منتشرشده دست نمی‌خورند و این موارد دوباره خودکار اضافه نمی‌شوند.`)) runBulk({ del: true }, e.target);
+    });
+    const dlg = $('#dvdlg'), bf = $('#dvbf');
+    $('#dvedit').addEventListener('click', () => { bf.reset(); $('#dvbn').textContent = `(${fa(chosen().length)} مورد)`; dlg.showModal(); });
+    bf.phone.addEventListener('input', () => { if (bf.phone.value) bf.clearphone.checked = false; });
+    dlg.addEventListener('close', () => {
+      if (dlg.returnValue !== 'ok') return;
+      const ph = toEnDigits(bf.phone.value).replace(/[^\d+]/g, ''), op = {};
+      if (ph) op.contact_phone = ph; else if (bf.clearphone.checked) op.contact_phone = '';
+      if (bf.agent.value) op.agent_id = bf.agent.value;
+      if (bf.status.value) op.status = bf.status.value;
+      if (bf.note.value.trim()) op.note = bf.note.value.trim();
+      if (bf.publish.checked) op.publish = true;
+      if (!Object.keys(op).length) return toast('چیزی برای تغییر انتخاب نشد');
+      if (op.publish && !confirm(`پیش‌نویس‌های ${fa(chosen().length)} مورد انتخاب‌شده منتشر شوند و مشتری‌ها ببینند؟`)) return;
+      runBulk(op, $('#dvedit'));
+    });
+  }
   if (isAdmin()) {
     watchUI();
     $('#won').addEventListener('change', e => e.target.checked ? watchStart() : watchStop());
@@ -1748,6 +1841,7 @@ async function viewEdit(arg) {
         ${num('floor', 'طبقه (زیرزمین: ‎-۱)', l.floor)}${num('floors', 'تعداد طبقات', l.floors)}${num('year_built', 'سال ساخت', l.year_built, '۱۴۰۰')}</div>
       <div><span class="muted small">امکانات</span><div class="chips" id="fe" style="margin-top:4px">${FEATURES.map(f => `<button type="button" class="chip${feats.has(f) ? ' on' : ''}" data-f="${f}">${f}</button>`).join('')}</div></div>
       <label class="f"><span>توضیحات</span><textarea name="description" maxlength="4000" rows="5">${esc(l.description || '')}</textarea></label>
+      <label class="f"><span>شماره تماس روی این آگهی (اختیاری؛ خالی = شماره مشاور)</span><input name="contact_phone" inputmode="tel" dir="ltr" value="${esc(l.contact_phone || '')}"></label>
     </div>
     <div class="card stack"><h3>عکس‌ها</h3><p class="muted small" style="margin:0">عکس اول، کاور آگهی است. عکس‌ها قبل از ارسال کم‌حجم می‌شوند.</p><div class="upl" id="up"></div></div>
     <div class="card stack private"><h3>🔒 اطلاعات محرمانه</h3><p class="muted small" style="margin:0">فقط شما و ادمین می‌بینید؛ هرگز به مشتری نمایش داده نمی‌شود.</p>
@@ -1817,7 +1911,7 @@ async function viewEdit(arg) {
       ...(isNew ? {} : { id: l.id }), deal, ptype: v('ptype'), status: v('status'), title: v('title'), city: v('city'), district: v('district'),
       misc_kind: deal === 'misc' ? v('misc_kind') : null, price: deal !== 'rent' ? n('price') : null, deposit: deal === 'rent' ? n('deposit') : null, rent: deal === 'rent' ? n('rent') : null,
       area: n('area'), land_area: n('land_area'), rooms: n('rooms'), floor: toInt(v('floor')), floors: n('floors'), year_built: n('year_built'),
-      features: [...feats], description: v('description'), images: imgs,
+      features: [...feats], description: v('description'), images: imgs, contact_phone: toEnDigits(v('contact_phone')).replace(/[^\d+]/g, '') || null,
       ...(admin ? { agent_id: v('agent_id'), featured: f.featured.checked, verified: f.verified.checked } : {})
     };
     const b = $('#sv'); b.disabled = true;
