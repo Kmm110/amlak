@@ -9,21 +9,27 @@ const DEMO = !CFG.publicRepo || /[?&]demo\b/.test(location.search);
    «main» بنگاه خود مدیر اصلی سامانه است (آدرس بدون ?a=). فهرست بنگاه‌ها و اشتراک‌ها در registry.json (فقط مدیر اصلی می‌نویسد). */
 const TENANT = ((new URLSearchParams(location.search).get('a') || '').toLowerCase().replace(/[^a-z0-9-]/g, '')) || 'main';
 const K = n => TENANT === 'main' ? n : n + ':' + TENANT;
-// قیمت‌ها به تومان؛ daily = آگهی دیوار در روز (۰ یعنی نامحدود)
+// قیمت‌ها به تومان؛ daily = آگهی دیوار در روز، weekly = در ۷ روز اخیر (۰ یعنی نامحدود)
 const DEF_TIERS = {
-  silver: { name: 'نقره‌ای', daily: 10, every: 60, prices: { m1: 5e6, m3: 12e6, m6: 23e6, m12: 44e6 } },
-  gold: { name: 'طلایی', daily: 20, every: 20, prices: { m1: 12e6, m3: 33e6, m6: 60e6, m12: 110e6 } },
-  platinum: { name: 'پلاتینی', daily: 0, every: 5, prices: { m1: 20e6, m3: 57e6, m6: 110e6, m12: 200e6 } } };
+  silver: { name: 'نقره‌ای', daily: 10, weekly: 50, every: 60, prices: { m1: 5e6, m3: 12e6, m6: 23e6, m12: 44e6 } },
+  gold: { name: 'طلایی', daily: 30, weekly: 180, every: 20, prices: { m1: 12e6, m3: 33e6, m6: 60e6, m12: 110e6 } },
+  platinum: { name: 'پلاتینی', daily: 0, weekly: 0, every: 5, prices: { m1: 20e6, m3: 57e6, m6: 110e6, m12: 200e6 } } };
+const lim = n => +n > 0 ? +n : Infinity;
+// شمارش آگهی‌های دیوار: { 'YYYY-MM-DD': n } فقط ۷ روز اخیر
+const last7 = () => Array.from({ length: 7 }, (_, i) => dayKey(Date.now() - i * 864e5));
+const weekSum = days => last7().reduce((s, k) => s + (+(days || {})[k] || 0), 0);
+const bumpDays = (days, k) => { const keep = new Set(last7()), o = {}; for (const [d, n] of Object.entries(days || {})) if (keep.has(d)) o[d] = n; o[k] = (o[k] || 0) + 1; return o; };
 // بسته‌های اشتراک (trial فقط موقع ساخت بنگاه)
 const PLANS = { trial: { name: 'آزمایشی ۷ روزه (رایگان)', short: 'آزمایشی', days: 7 }, m1: { name: 'یک ماهه', short: '۱ ماهه', days: 30 }, m3: { name: 'سه ماهه', short: '۳ ماهه', days: 90 },
   m6: { name: 'شش ماهه', short: '۶ ماهه', days: 180 }, m12: { name: 'یک ساله', short: '۱ ساله', days: 365 } };
 const PAID = ['m1', 'm3', 'm6', 'm12'];
 const tierFull = k => { const d = DEF_TIERS[k] || DEF_TIERS.silver, r = REG?.tiers?.[k] || {}; return { ...d, ...r, prices: { ...d.prices, ...(r.prices || {}) } }; };
-const dailyTxt = t => t.daily > 0 && t.daily !== Infinity ? `روزی ${fa(t.daily)} آگهی` : 'نامحدود';
+const dailyTxt = t => lim(t.daily) === Infinity && lim(t.weekly) === Infinity ? 'نامحدود'
+  : [lim(t.daily) !== Infinity && `روزی ${fa(t.daily)}`, lim(t.weekly) !== Infinity && `هفته‌ای حداکثر ${fa(t.weekly)}`].filter(Boolean).join('، ') + ' آگهی';
 const tomanTxt = n => n >= 1e6 && n % 1e5 === 0 ? `${fa(n / 1e6)} میلیون تومان` : `${fa(n)} تومان`;
 let REG = null, TEN = null;
 const REG_REPO = () => CFG.registryRepo || CFG.publicRepo;
-const dayKey = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Tehran' });
+const dayKey = (ts = Date.now()) => new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Asia/Tehran' });
 async function loadRegistry() {
   if (DEMO) return;
   try { const r = await fetch(`https://raw.githubusercontent.com/${REG_REPO()}/main/registry.json?t=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' }); REG = r.ok ? await r.json() : null; } catch { REG = null; }
@@ -33,7 +39,7 @@ async function loadRegistry() {
   Object.assign(CFG, { name: TEN.name, tagline: TEN.tagline || CFG.tagline, phone: TEN.phone || '' });
   NEW_PUB = { repo: TEN.publicRepo, branch: 'main' }; OLD_PUB = null;
 }
-const tierOf = () => { if (TENANT === 'main' || DEMO) return { name: 'نامحدود', daily: Infinity, every: 5 }; const t = tierFull(TEN?.tier); return { ...t, daily: +t.daily > 0 ? +t.daily : Infinity }; };
+const tierOf = () => { if (TENANT === 'main' || DEMO) return { name: 'نامحدود', daily: Infinity, weekly: Infinity, every: 5 }; const t = tierFull(TEN?.tier); return { ...t, daily: lim(t.daily), weekly: lim(t.weekly) }; };
 function subState() {
   if (TENANT === 'main' || DEMO) return { ok: true, main: true, tier: tierOf() };
   const exp = TEN?.expires ? new Date(TEN.expires) : null, days = exp ? Math.ceil((exp - Date.now()) / 864e5) : 0;
@@ -355,8 +361,25 @@ function GitHubDB() {
       async stats(slug) {
         guardOwner(); const x = REG.tenants[slug], d = await tRead(x.privateRepo), today = dayKey();
         const st = d.staff || [], ls = d.listings || [], lastLog = (d.log || [])[0];
+        const boss = st.find(s => s.owner) || st.find(s => s.role === 'admin');
         return { admins: st.filter(s => s.role === 'admin' && s.active).length, agents: st.filter(s => s.role === 'agent' && s.active).length, listings: ls.length, active: ls.filter(l => l.status === 'active').length,
-          divarToday: d.divarDaily?.day === today ? d.divarDaily.n : 0, lastLogin: lastLog?.at || null, lastWho: lastLog ? st.find(s => s.id === lastLog.uid)?.full_name : null };
+          divarToday: d.divarDaily?.day === today ? d.divarDaily.n : 0, divarWeek: weekSum(d.divarDays), lastLogin: lastLog?.at || null, lastWho: lastLog ? st.find(s => s.id === lastLog.uid)?.full_name : null,
+          boss: boss ? { id: boss.id, full_name: boss.full_name, phone: boss.phone || '' } : null,
+          staff: st.map(s => ({ id: s.id, full_name: s.full_name, phone: s.phone || '', role: s.role, active: !!s.active, boss: s.id === boss?.id, created_at: s.created_at, last_login: s.last_login || null, listings: ls.filter(l => l.agent_id === s.id).length })) };
+      },
+      // حذف همیشگی یک مشاور از یک بنگاه؛ آگهی‌هایش به مدیر همان بنگاه سپرده می‌شود
+      async removeStaff(slug, id) {
+        guardOwner(); const x = REG.tenants[slug];
+        const d = await tMutate(x.privateRepo, d => {
+          const boss = d.staff.find(s => s.owner) || d.staff.find(s => s.role === 'admin');
+          if (!d.staff.some(s => s.id === id)) throw new Error('این نفر پیدا نشد');
+          if (id === boss?.id) throw new Error('مدیر بنگاه را نمی‌شود حذف کرد');
+          d.staff = d.staff.filter(s => s.id !== id);
+          d.listings.forEach(l => { if (l.agent_id === id) l.agent_id = boss.id; });
+          return d;
+        }, 'حذف مشاور توسط مدیر سامانه');
+        const pub = d.pub?.repo || x.publicRepo, cur = await ghM(`/repos/${pub}/contents/public.json`).catch(() => null);
+        await ghM(`/repos/${pub}/contents/public.json`, { method: 'PUT', body: JSON.stringify({ message: 'به‌روزرسانی مشاوران', content: toB64(JSON.stringify(publicView(d))), ...(cur?.sha ? { sha: cur.sha } : {}) }) });
       },
       hasToken: slug => !!VAULT?.tenants?.[slug],
       async setTenantToken(slug, token) {
@@ -444,6 +467,11 @@ function GitHubDB() {
       const h = await hashPw(pw), rewrap = id === ownerId() && id === dev.uid && VKEY && P?.vault ? await sealInvite(pw, { k: VKEY }) : null;
       await mutate(d => { Object.assign(d.staff.find(s => s.id === id), h); if (rewrap && d.vault) d.vault.wrap = rewrap; }, 'تغییر رمز', false);
     },
+    // حذف همیشگی (فقط مدیر اصلی)؛ آگهی‌های او به خود مدیر اصلی سپرده می‌شود
+    async removeStaff(id) {
+      if (dev?.uid !== ownerId() || id === ownerId()) deny();
+      await mutate(d => { if (!d.staff.some(s => s.id === id)) throw new Error('این نفر پیدا نشد'); const o = ownerId(); d.staff = d.staff.filter(s => s.id !== id); d.listings.forEach(l => { if (l.agent_id === id) l.agent_id = o; }); }, 'حذف مشاور');
+    },
     async addStaff(p) {
       if (!admin()) deny();
       if (P.staff.some(s => normName(s.full_name) === normName(p.full_name))) throw new Error('این نام قبلا ثبت شده است؛ نام را کمی متفاوت بنویسید (مثلا با نام خانوادگی)');
@@ -508,7 +536,7 @@ function GitHubDB() {
     // «فایل‌های دیوار»: لینک‌هایی که کارمندان پیدا می‌کنند، برای همه کارمندان
     nameOf(id) { const u = P?.staff.find(x => x.id === id); if (!u) return '—'; return u.role === 'admin' && id !== dev.uid && dev.uid !== ownerId() ? 'مدیر' : u.full_name; },
     // در بنگاه‌های مشترک، «محدوده» (جستجوهای دیوار) را فقط مدیر اصلی سامانه تعیین می‌کند
-    async divarList() { if (!staff()) deny(); await loadPriv(); return clone({ items: P.divar || [], searches: TENANT !== 'main' ? TEN?.searches || [] : P.divarSearches || [], ignore: P.divarIgnore || [], daily: P.divarDaily || null }); },
+    async divarList() { if (!staff()) deny(); await loadPriv(); return clone({ items: P.divar || [], searches: TENANT !== 'main' ? TEN?.searches || [] : P.divarSearches || [], ignore: P.divarIgnore || [], daily: P.divarDaily || null, week: weekSum(P.divarDays) }); },
     // ثبت یک آگهی دیوار + پیش‌نویس مخفی آن، در یک ذخیره (تا گیت‌هاب از تعداد زیاد ذخیره‌ها جلوگیری نکند)
     async divarImport(x, l, pv) {
       if (!admin()) deny();
@@ -518,6 +546,7 @@ function GitHubDB() {
         const t = new Date().toISOString(); let lid = null;
         if (l) { lid = ++d.seq; d.listings.push({ ...l, id: lid, views: 0, featured: false, verified: false, created_at: t, updated_at: t, agent_id: l.agent_id || dev.uid }); if (pv) d.priv[lid] = pv; }
         const day = dayKey(); d.divarDaily = d.divarDaily?.day === day ? { day, n: d.divarDaily.n + 1 } : { day, n: 1 };   // سهمیه روزانه اشتراک
+        d.divarDays = bumpDays(d.divarDays, day);   // سهمیه هفتگی
         const n = { ...x, id: uid8(), by: dev.uid, at: t, status: 'new', ...(lid ? { listing_id: lid } : {}) };
         d.divar = [n, ...d.divar].slice(0, 500); return n;
       }, 'آگهی دیوار', false));
@@ -1387,9 +1416,15 @@ async function panelAgents(pt, all, leads) {
         ${!gh || DB.isOwner() ? `<select data-role="${p.id}" ${sel}>${opts(Object.entries(ROLES).filter(([k]) => (!gh || k !== 'pending') && (TENANT === 'main' || k !== 'admin' || p.role === 'admin')), p.role)}</select>` : ''}
         <label class="check small"><input type="checkbox" data-act="${p.id}"${p.active ? ' checked' : ''}> فعال</label>
         ${p.role === 'pending' ? `<button class="btn sm primary" data-ok="${p.id}">تأیید به‌عنوان مشاور</button>` : ''}
-        ${gh && p.active ? `<button class="btn sm" data-inv="${p.id}">رمز جدید و لینک دعوت</button>` : ''}</div>`}</div></div>`;
+        ${gh && p.active ? `<button class="btn sm" data-inv="${p.id}">رمز جدید و لینک دعوت</button>` : ''}
+        ${gh && DB.isOwner?.() && DB.removeStaff ? `<button class="btn sm danger" data-del="${p.id}" data-name="${esc(p.full_name || '')}">حذف</button>` : ''}</div>`}</div></div>`;
   }).join('')}</div>`;
   const upd = async (id, patch) => { try { await DB.updateProfile(id, patch); S.agents = null; S.panel = null; toast('ذخیره شد', 1200); viewPanel('agents'); } catch (e) { toast(e.message); } };
+  $$('[data-del]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm(`«${b.dataset.name}» برای همیشه حذف شود؟\nآگهی‌هایش به نام شما می‌ماند.`)) return;
+    b.disabled = true;
+    try { await DB.removeStaff(b.dataset.del); S.agents = null; S.panel = null; toast('حذف شد'); viewPanel('agents', true); } catch (e) { toast(e.message); b.disabled = false; }
+  }));
   $$('[data-role]').forEach(s => s.addEventListener('change', () => {
     if (s.value === 'admin' && !confirm('این کاربر دسترسی کامل ادمین می‌گیرد. مطمئنید؟')) return viewPanel('agents', true);
     upd(s.dataset.role, { role: s.value });
@@ -1446,10 +1481,13 @@ function notify(title, body) {
   try { if (window.Notification?.permission === 'granted') new Notification(title, { body, icon: 'icons/icon-192.png' }); } catch { }
 }
 async function watchOnce() {
-  const { items, searches, ignore = [], daily } = await DB.divarList();
+  const { items, searches, ignore = [], daily, week = 0 } = await DB.divarList();
   if (!subState().ok) { watchStop(); throw new Error('اشتراک بنگاه فعال نیست'); }
-  const tier = tierOf(), used = daily?.day === dayKey() ? daily.n : 0;
-  if (used >= tier.daily) { WATCH.msg = `سهمیه امروز اشتراک ${tier.name} (${fa(tier.daily)} آگهی) پر شد؛ فردا ادامه می‌دهد`; return; }
+  const tier = tierOf(), usedDay = daily?.day === dayKey() ? daily.n : 0;
+  if (week >= tier.weekly) { WATCH.msg = `سهمیه هفتگی اشتراک ${tier.name} (${fa(tier.weekly)} آگهی در ۷ روز) پر شد؛ با گذشت روزها دوباره باز می‌شود`; return; }
+  if (usedDay >= tier.daily) { WATCH.msg = `سهمیه امروز اشتراک ${tier.name} (${fa(tier.daily)} آگهی) پر شد؛ فردا ادامه می‌دهد`; return; }
+  // سقف این دور = کمترین باقی‌مانده روزانه و هفتگی
+  const room = Math.min(tier.daily - usedDay, tier.weekly - week), used = 0, cap = { daily: room };
   if (!searches.length) throw new Error(TENANT !== 'main' ? 'هنوز محدوده‌ای برای این بنگاه تعیین نشده؛ با پشتیبانی سامانه تماس بگیرید' : 'اول یک «جستجوی آماده» دیوار ذخیره کنید (پایین همین صفحه)');
   // هر آگهی‌ای که در نتیجه جستجو هست و هنوز در فهرست نیست (و دستی حذف نشده) اضافه می‌شود
   const known = new Set([...items.map(x => Divar.tokenOf(x.url)), ...ignore]);
@@ -1461,7 +1499,7 @@ async function watchOnce() {
     const todo = tokens.filter(t => !known.has(t) && (fails[t] || 0) < 9);
     pending += todo.length;
     for (const t of todo) {
-      if (fresh >= PER_TICK || used + fresh >= tier.daily) break;
+      if (fresh >= PER_TICK || used + fresh >= cap.daily) break;
       known.add(t);
       const url = 'https://divar.ir/v/' + t;
       let d = {};

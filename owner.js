@@ -3,6 +3,7 @@
    ساخت بنگاه جدید (دو مخزن جدا برای هر بنگاه)، اشتراک ۳۰ روزه، سطح‌ها (نقره‌ای/طلایی/پلاتینی)، توکن و لینک دعوت هر بنگاه. */
 
 const TIER_KEYS = ['silver', 'gold', 'platinum'];
+const HUES = [210, 145, 30, 280, 350, 180, 55, 320, 100, 250];   // رنگ کادر هر بنگاه
 const siteOf = slug => location.origin + location.pathname + '?a=' + slug;
 // «۱۲»، «۱۲٫۵»، «12.5» → عدد (میلیون تومان)
 const millions = s => parseFloat(String(s ?? '').replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[٫/]/g, '.').replace(/[^\d.]/g, '')) || 0;
@@ -45,12 +46,15 @@ async function panelAgencies(pt) {
         <button class="btn primary">ساخت بنگاه</button>
         <p class="small muted" style="margin:0">اپ دو مخزن جداگانه برای این بنگاه می‌سازد (اطلاعات محرمانه و آگهی‌ها). بنگاه‌ها به اطلاعات هم دسترسی ندارند.</p>
       </form></details>
-    <div class="tbl" id="ag-list">${list.map(([slug, x]) => { const [st, cls] = state(x), d = daysLeft(x), t = tiers[x.tier] || tiers.silver; return `
-      <div class="card stack" data-slug="${esc(slug)}">
+    <div class="tbl" id="ag-list">${list.map(([slug, x], i) => { const [st, cls] = state(x), d = daysLeft(x), t = tiers[x.tier] || tiers.silver, hue = HUES[i % HUES.length]; return `
+      <div class="card stack" data-slug="${esc(slug)}" style="border:2px solid hsl(${hue} 60% 45%);background:hsla(${hue},70%,50%,.07);margin-bottom:12px">
+        <div style="height:6px;border-radius:6px;background:hsl(${hue} 60% 45%);margin:-4px 0 2px"></div>
         <div class="row"><b style="flex:1;font-size:16px">${esc(x.name)}</b>${x.trial && d > 0 ? '<span class="tag warn">آزمایشی</span>' : ''}<span class="tag ${cls}">${st}</span><span class="tag">${esc(t.name)}${PLANS[x.plan] && !x.trial ? ' · ' + PLANS[x.plan].short : ''}</span></div>
         <div class="small muted" dir="ltr" style="text-align:right">${esc(slug)} · ${esc(x.phone || '')}</div>
         <div class="small">${x.expires ? `پایان اشتراک: <b>${new Date(x.expires).toLocaleDateString('fa-IR')}</b> · ${d > 0 ? `${fa(d)} روز مانده` : `${fa(-d)} روز گذشته`}` : 'هنوز فعال نشده'}</div>
+        <div class="small" data-boss></div>
         <div class="small muted" data-stats>در حال خواندن آمار…</div>
+        <details class="small" data-staffbox><summary style="cursor:pointer"><b>👥 مدیر و مشاوران این بنگاه</b> <span class="muted" data-staffn></span></summary><div class="tbl" data-staff style="margin-top:6px"></div></details>
         <div class="row">
           <select data-plan ${sel}>${planOpts(false)}</select><button class="btn sm primary" data-renew>✅ پول را گرفتم — تمدید</button>
           ${x.active === false ? '<button class="btn sm" data-on>فعال کردن دوباره</button>' : '<button class="btn sm danger" data-off>قطع اشتراک</button>'}
@@ -71,6 +75,7 @@ async function panelAgencies(pt) {
       <form class="stack" id="ag-tiers" style="margin-top:10px">
         ${TIER_KEYS.map(k => `<div class="stack" style="padding:10px;border-radius:12px;background:var(--sunk)"><div class="grid3"><label class="f"><span>نام</span><input name="${k}-name" value="${esc(tiers[k].name)}"></label>
           <label class="f"><span>آگهی دیوار در روز (۰ = نامحدود)</span><input name="${k}-daily" inputmode="numeric" value="${fa(tiers[k].daily || 0)}"></label>
+          <label class="f"><span>سقف ۷ روز (۰ = نامحدود)</span><input name="${k}-weekly" inputmode="numeric" value="${fa(tiers[k].weekly || 0)}"></label>
           <label class="f"><span>سرعت دیده‌بان (ثانیه)</span><select name="${k}-every">${opts([5, 10, 20, 30, 60].map(x => [x, fa(x) + ' ثانیه']), tiers[k].every)}</select></label></div>
           <div class="grid2">${PAID.map(p => `<label class="f"><span>${PLANS[p].name} (میلیون تومان)</span><input name="${k}-${p}" inputmode="decimal" value="${fa((tiers[k].prices[p] || 0) / 1e6)}"></label>`).join('')}</div></div>`).join('')}
         <button class="btn">ذخیره سطح‌ها و قیمت‌ها</button></form></details>
@@ -82,7 +87,18 @@ async function panelAgencies(pt) {
   // آمار هر بنگاه (از مخزن خودش، با توکن مدیر کل)
   for (const [slug] of list) {
     const box = $(`[data-slug="${slug}"] [data-stats]`, pt);
-    O.stats(slug).then(s => { const dl = (tiers[REG.tenants[slug].tier] || tiers.silver).daily; box.innerHTML = `${fa(s.admins)} مدیر · ${fa(s.agents)} مشاور · ${fa(s.listings)} آگهی (${fa(s.active)} فعال) · دیوار امروز: ${fa(s.divarToday)} از ${dl > 0 ? fa(dl) : 'نامحدود'}${s.lastLogin ? ` · آخرین ورود: ${esc(s.lastWho || '')} ${ago(s.lastLogin)}` : ''}`; })
+    O.stats(slug).then(s => {
+      const card = box.closest('[data-slug]'), tt = tiers[REG.tenants[slug].tier] || tiers.silver, dl = tt.daily, wl = tt.weekly;
+      $('[data-boss]', card).innerHTML = s.boss ? `مدیر بنگاه: <b>${esc(s.boss.full_name)}</b>${s.boss.phone ? ` · <a href="tel:${esc(s.boss.phone)}" dir="ltr">${esc(faStr(s.boss.phone))}</a>` : ''}` : '';
+      const ag = s.staff.filter(p => !p.boss);
+      $('[data-staffn]', card).textContent = `(${fa(ag.length)} مشاور)`;
+      $('[data-staff]', card).innerHTML = s.staff.sort((a, b) => b.boss - a.boss).map(p => `<div class="tr" style="padding:6px 0"><div class="mid"><b>${esc(p.full_name)}</b> <span class="tag${p.boss ? ' sale' : ''}">${p.boss ? 'مدیر بنگاه' : 'مشاور'}</span>${p.active ? '' : ' <span class="tag bad">غیرفعال</span>'}
+        <div class="muted">${esc(faStr(p.phone || ''))}${p.phone ? ' · ' : ''}عضو از ${p.created_at ? new Date(p.created_at).toLocaleDateString('fa-IR') : '—'} · ${fa(p.listings)} آگهی${p.last_login ? ' · آخرین ورود ' + ago(p.last_login) : ''}</div></div>
+        ${p.boss ? '' : `<button class="btn sm danger" data-delst="${esc(p.id)}" data-name="${esc(p.full_name)}">حذف</button>`}</div>`).join('') || '<div class="muted">هنوز کسی عضو نشده</div>';
+      $$('[data-delst]', card).forEach(b => b.addEventListener('click', () => {
+        if (confirm(`«${b.dataset.name}» از «${REG.tenants[slug].name}» برای همیشه حذف شود؟\nآگهی‌هایش به نام مدیر همان بنگاه می‌ماند.`)) act(b, () => O.removeStaff(slug, b.dataset.delst), 'حذف شد');
+      }));
+      box.innerHTML = `${fa(s.admins)} مدیر · ${fa(s.agents)} مشاور · ${fa(s.listings)} آگهی (${fa(s.active)} فعال) · دیوار امروز: ${fa(s.divarToday)} از ${dl > 0 ? fa(dl) : 'نامحدود'} · این هفته: ${fa(s.divarWeek || 0)} از ${wl > 0 ? fa(wl) : 'نامحدود'}${s.lastLogin ? ` · آخرین ورود: ${esc(s.lastWho || '')} ${ago(s.lastLogin)}` : ''}`; })
       .catch(e => { box.textContent = 'آمار خوانده نشد: ' + e.message; });
   }
   $$('[data-slug]', pt).forEach(card => {
@@ -123,7 +139,7 @@ async function panelAgencies(pt) {
   });
   $('#ag-tiers').addEventListener('submit', e => {
     e.preventDefault(); const f = e.target;
-    const t = Object.fromEntries(TIER_KEYS.map(k => [k, { name: f[k + '-name'].value.trim() || DEF_TIERS[k].name, daily: Math.max(0, toNum(f[k + '-daily'].value) || 0), every: +f[k + '-every'].value,
+    const t = Object.fromEntries(TIER_KEYS.map(k => [k, { name: f[k + '-name'].value.trim() || DEF_TIERS[k].name, daily: Math.max(0, toNum(f[k + '-daily'].value) || 0), weekly: Math.max(0, toNum(f[k + '-weekly'].value) || 0), every: +f[k + '-every'].value,
       prices: Object.fromEntries(PAID.map(p => [p, Math.round(millions(f[k + '-' + p].value) * 1e6)])) }]));
     act($('button', f), () => O.saveTiers(t), 'سطح‌ها ذخیره شد');
   });
