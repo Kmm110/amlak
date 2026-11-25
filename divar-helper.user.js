@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         کمک‌یار دیوار — اپ املاک
 // @namespace    https://kmm110.github.io/amlak/
-// @version      1.0.0
+// @version      1.0.1
 // @description  به اپ املاک اجازه می‌دهد آگهی‌های دیوار را با اینترنت همین دستگاه بخواند. فقط صفحه‌های divar.ir را می‌خواند و به هیچ جای دیگری وصل نمی‌شود.
 // @match        https://kmm110.github.io/amlak/*
 // @grant        GM_xmlhttpRequest
