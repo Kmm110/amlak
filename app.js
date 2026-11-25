@@ -9,7 +9,18 @@ const DEMO = !CFG.publicRepo || /[?&]demo\b/.test(location.search);
    «main» بنگاه خود مدیر اصلی سامانه است (آدرس بدون ?a=). فهرست بنگاه‌ها و اشتراک‌ها در registry.json (فقط مدیر اصلی می‌نویسد). */
 const TENANT = ((new URLSearchParams(location.search).get('a') || '').toLowerCase().replace(/[^a-z0-9-]/g, '')) || 'main';
 const K = n => TENANT === 'main' ? n : n + ':' + TENANT;
-const DEF_TIERS = { silver: { name: 'نقره‌ای', daily: 10, every: 60 }, gold: { name: 'طلایی', daily: 20, every: 20 }, platinum: { name: 'پلاتینی', daily: 40, every: 5 } };
+// قیمت‌ها به تومان؛ daily = آگهی دیوار در روز (۰ یعنی نامحدود)
+const DEF_TIERS = {
+  silver: { name: 'نقره‌ای', daily: 10, every: 60, prices: { m1: 5e6, m3: 12e6, m6: 23e6, m12: 44e6 } },
+  gold: { name: 'طلایی', daily: 20, every: 20, prices: { m1: 12e6, m3: 33e6, m6: 60e6, m12: 110e6 } },
+  platinum: { name: 'پلاتینی', daily: 0, every: 5, prices: { m1: 20e6, m3: 57e6, m6: 110e6, m12: 200e6 } } };
+// بسته‌های اشتراک (trial فقط موقع ساخت بنگاه)
+const PLANS = { trial: { name: 'آزمایشی ۷ روزه (رایگان)', short: 'آزمایشی', days: 7 }, m1: { name: 'یک ماهه', short: '۱ ماهه', days: 30 }, m3: { name: 'سه ماهه', short: '۳ ماهه', days: 90 },
+  m6: { name: 'شش ماهه', short: '۶ ماهه', days: 180 }, m12: { name: 'یک ساله', short: '۱ ساله', days: 365 } };
+const PAID = ['m1', 'm3', 'm6', 'm12'];
+const tierFull = k => { const d = DEF_TIERS[k] || DEF_TIERS.silver, r = REG?.tiers?.[k] || {}; return { ...d, ...r, prices: { ...d.prices, ...(r.prices || {}) } }; };
+const dailyTxt = t => t.daily > 0 && t.daily !== Infinity ? `روزی ${fa(t.daily)} آگهی` : 'نامحدود';
+const tomanTxt = n => n >= 1e6 && n % 1e5 === 0 ? `${fa(n / 1e6)} میلیون تومان` : `${fa(n)} تومان`;
 let REG = null, TEN = null;
 const REG_REPO = () => CFG.registryRepo || CFG.publicRepo;
 const dayKey = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Tehran' });
@@ -22,7 +33,7 @@ async function loadRegistry() {
   Object.assign(CFG, { name: TEN.name, tagline: TEN.tagline || CFG.tagline, phone: TEN.phone || '' });
   NEW_PUB = { repo: TEN.publicRepo, branch: 'main' }; OLD_PUB = null;
 }
-const tierOf = () => TENANT === 'main' || DEMO ? { name: 'نامحدود', daily: Infinity, every: 5 } : { ...(DEF_TIERS[TEN?.tier] || DEF_TIERS.silver), ...(REG?.tiers?.[TEN?.tier] || {}) };
+const tierOf = () => { if (TENANT === 'main' || DEMO) return { name: 'نامحدود', daily: Infinity, every: 5 }; const t = tierFull(TEN?.tier); return { ...t, daily: +t.daily > 0 ? +t.daily : Infinity }; };
 function subState() {
   if (TENANT === 'main' || DEMO) return { ok: true, main: true, tier: tierOf() };
   const exp = TEN?.expires ? new Date(TEN.expires) : null, days = exp ? Math.ceil((exp - Date.now()) / 864e5) : 0;
@@ -322,10 +333,22 @@ function GitHubDB() {
         const boss = { id: uid8(), full_name: o.boss.name, phone: o.boss.phone || '', bio: 'مدیر بنگاه', role: 'admin', owner: true, active: true, ...h, created_at: t };
         await ghM(`/repos/${priv}/contents/private.json`, { method: 'PUT', body: JSON.stringify({ message: 'راه‌اندازی بنگاه', content: toB64(JSON.stringify({ v: 1, seq: 100, staff: [boss], listings: [], priv: {}, designs: [], pub: { repo: pub, branch: 'main' } })) }) });
         await ghM(`/repos/${pub}/contents/public.json`, { method: 'PUT', body: JSON.stringify({ message: 'راه‌اندازی بنگاه', content: toB64(JSON.stringify({ updated: t, listings: [], agents: [{ id: boss.id, full_name: boss.full_name, phone: boss.phone, bio: boss.bio }], designs: [] })) }) });
-        await regMutate(r => { r.tenants = r.tenants || {}; r.tenants[slug] = { name: o.name, tagline: 'خرید، فروش و اجاره', phone: o.phone || '', publicRepo: pub, privateRepo: priv, tier: o.tier || 'silver', active: !!o.activate, expires: o.activate ? new Date(Date.now() + 30 * 864e5).toISOString() : null, created: t, bossId: boss.id, history: o.activate ? [{ at: t, days: 30 }] : [] }; });
+        const tier = o.tier || 'silver', pl = PLANS[o.plan] ? o.plan : null;
+        const h0 = pl ? { at: t, plan: pl, days: PLANS[pl].days, tier, price: pl === 'trial' ? 0 : tierFull(tier).prices[pl] || 0 } : null;
+        const searches = (o.searches || []).filter(s => s?.url);
+        await regMutate(r => { r.tenants = r.tenants || {}; r.tenants[slug] = { name: o.name, tagline: 'خرید، فروش و اجاره', phone: o.phone || '', publicRepo: pub, privateRepo: priv, tier, active: !!pl, trial: pl === 'trial', plan: pl, expires: pl ? new Date(Date.now() + PLANS[pl].days * 864e5).toISOString() : null, created: t, bossId: boss.id, searches, history: h0 ? [h0] : [] }; });
         return { slug, priv, pub, bossId: boss.id };
       },
-      async renew(slug, days = 30) { guardOwner(); await regMutate(r => { const x = r.tenants[slug], base = Math.max(Date.now(), x.expires ? new Date(x.expires).getTime() : 0); x.expires = new Date(base + days * 864e5).toISOString(); x.active = true; x.history = [{ at: new Date().toISOString(), days }, ...(x.history || [])].slice(0, 50); }); },
+      // تمدید با یک بسته پولی؛ روزهای باقی‌مانده سوخت نمی‌شود
+      async renew(slug, plan = 'm1') {
+        guardOwner(); if (!PAID.includes(plan)) throw new Error('بسته نامعتبر است');
+        await regMutate(r => {
+          const x = r.tenants[slug], base = Math.max(Date.now(), x.expires ? new Date(x.expires).getTime() : 0), days = PLANS[plan].days;
+          x.expires = new Date(base + days * 864e5).toISOString(); x.active = true; x.trial = false; x.plan = plan;
+          x.history = [{ at: new Date().toISOString(), plan, days, tier: x.tier, price: (({ ...DEF_TIERS[x.tier]?.prices, ...(r.tiers?.[x.tier]?.prices || {}) })[plan]) || 0 }, ...(x.history || [])].slice(0, 100);
+        });
+      },
+      async setSearches(slug, list) { guardOwner(); await regMutate(r => { r.tenants[slug].searches = list.filter(s => s?.url); }); },
       async setActive(slug, on) { guardOwner(); await regMutate(r => { r.tenants[slug].active = !!on; }); },
       async setTier(slug, tier) { guardOwner(); await regMutate(r => { r.tenants[slug].tier = tier; }); },
       async setInfo(slug, info) { guardOwner(); await regMutate(r => { Object.assign(r.tenants[slug], info); }); },
@@ -368,7 +391,7 @@ function GitHubDB() {
         if (TENANT === 'main' && u.id === ownerId() && P.vault) { try { await unlockVault(pw); } catch { } }
         return 'in';
       }
-      if (!allowCreate || this.deviceKind() !== 'admin') throw new Error('نام یا رمز اشتباه است');
+      if (!allowCreate || TENANT !== 'main' || this.deviceKind() !== 'admin') throw new Error('نام یا رمز اشتباه است');   // در بنگاه‌های مشترک فقط یک مدیر
       if (pw.length < 6) throw new Error('رمز باید حداقل ۶ حرف باشد');
       const h = await hashPw(pw), id = uid8();
       await mutate(d => {
@@ -424,7 +447,7 @@ function GitHubDB() {
     async addStaff(p) {
       if (!admin()) deny();
       if (P.staff.some(s => normName(s.full_name) === normName(p.full_name))) throw new Error('این نام قبلا ثبت شده است؛ نام را کمی متفاوت بنویسید (مثلا با نام خانوادگی)');
-      const h = await hashPw(p.pw), u = { id: uid8(), full_name: p.full_name, phone: p.phone, bio: '', role: dev.uid === ownerId() && p.role === 'admin' ? 'admin' : 'agent', active: true, ...h, created_at: new Date().toISOString() };
+      const h = await hashPw(p.pw), u = { id: uid8(), full_name: p.full_name, phone: p.phone, bio: '', role: TENANT === 'main' && dev.uid === ownerId() && p.role === 'admin' ? 'admin' : 'agent', active: true, ...h, created_at: new Date().toISOString() };
       await mutate(d => { d.staff.push(u); }, 'افزودن مشاور ' + p.full_name); return u.id;
     },
     async listings() {
@@ -461,6 +484,7 @@ function GitHubDB() {
     async updateProfile(id, patch) {
       if (id !== dev.uid && !admin()) deny();
       if (id === ownerId() && dev.uid !== id) deny();
+      if (TENANT !== 'main' && patch.role === 'admin') throw new Error('هر بنگاه فقط یک مدیر دارد؛ فقط مشاور می‌توانید اضافه کنید');
       if (dev.uid !== ownerId()) {   // فقط مدیر اصلی روی ادمین‌ها و نقش ادمین اختیار دارد
         const t = P.staff.find(s => s.id === id);
         if (id !== dev.uid && t?.role === 'admin') deny();
@@ -483,7 +507,8 @@ function GitHubDB() {
     async addLead() { }, async leads() { return []; }, async updateLead() { },
     // «فایل‌های دیوار»: لینک‌هایی که کارمندان پیدا می‌کنند، برای همه کارمندان
     nameOf(id) { const u = P?.staff.find(x => x.id === id); if (!u) return '—'; return u.role === 'admin' && id !== dev.uid && dev.uid !== ownerId() ? 'مدیر' : u.full_name; },
-    async divarList() { if (!staff()) deny(); await loadPriv(); return clone({ items: P.divar || [], searches: P.divarSearches || [], ignore: P.divarIgnore || [], daily: P.divarDaily || null }); },
+    // در بنگاه‌های مشترک، «محدوده» (جستجوهای دیوار) را فقط مدیر اصلی سامانه تعیین می‌کند
+    async divarList() { if (!staff()) deny(); await loadPriv(); return clone({ items: P.divar || [], searches: TENANT !== 'main' ? TEN?.searches || [] : P.divarSearches || [], ignore: P.divarIgnore || [], daily: P.divarDaily || null }); },
     // ثبت یک آگهی دیوار + پیش‌نویس مخفی آن، در یک ذخیره (تا گیت‌هاب از تعداد زیاد ذخیره‌ها جلوگیری نکند)
     async divarImport(x, l, pv) {
       if (!admin()) deny();
@@ -509,7 +534,7 @@ function GitHubDB() {
     async divarUpdate(id, patch) { if (!staff()) deny(); await mutate(d => { const x = (d.divar || []).find(y => y.id === id); if (x) Object.assign(x, patch, { by_status: dev.uid, at_status: new Date().toISOString() }); }, 'فایل دیوار', false); },
     async divarDelete(id) { await mutate(d => { const x = (d.divar || []).find(y => y.id === id); if (!x) return; if (!admin() && x.by !== dev.uid) deny(); d.divar = d.divar.filter(y => y.id !== id);
       const tok = Divar.tokenOf(x.url); if (tok) d.divarIgnore = [tok, ...(d.divarIgnore || []).filter(t => t !== tok)].slice(0, 3000); }, 'حذف فایل دیوار', false); },   // حذف‌شده‌ها دوباره خودکار اضافه نشوند
-    async divarSaveSearches(list) { if (!admin()) deny(); await mutate(d => { d.divarSearches = list; }, 'جستجوهای دیوار', false); },
+    async divarSaveSearches(list) { if (!admin() || TENANT !== 'main') deny(); await mutate(d => { d.divarSearches = list; }, 'جستجوهای دیوار', false); },
     async divarResetAuto() {
       if (!admin()) deny();
       return mutate(d => {
@@ -1124,7 +1149,7 @@ function viewLogin() {
   $('#f').addEventListener('submit', async e => {
     e.preventDefault(); const b = $('#sb'), name = e.target.name.value.trim(), pw = e.target.pw.value;
     let create = false;
-    if (adminDev && !DB.nameExists(name)) {
+    if (adminDev && TENANT === 'main' && !DB.nameExists(name)) {
       if (pw.length < 6) return toast('رمز باید حداقل ۶ حرف باشد');
       if (!confirm(`حساب مدیر جدید با نام «${name}» ساخته شود؟\n(اگر قبلا حساب دارید، «لغو» را بزنید و نامتان را دقیقا مثل قبل بنویسید)`)) return;
       create = true;
@@ -1199,8 +1224,26 @@ function viewExpired() {
   view().innerHTML = `<div class="empty">${I.user}<h3>${s.suspended ? `اشتراک ${esc(CFG.name)} متوقف شده است` : s.exp ? `اشتراک ${esc(CFG.name)} در تاریخ ${s.exp.toLocaleDateString('fa-IR')} به پایان رسیده است` : `اشتراک ${esc(CFG.name)} هنوز فعال نشده است`}</h3>
     <p>برای ${s.exp ? 'تمدید' : 'فعال‌سازی'} اشتراک با پشتیبانی سامانه تماس بگیرید${sup.name ? ': ' + esc(sup.name) : ''}. آگهی‌ها و اطلاعات شما محفوظ است.</p>
     ${sup.phone ? `<a class="btn primary" href="tel:${esc(sup.phone)}">${I.phone} ${esc(faStr(sup.phone))}</a>` : ''}
-    <div class="row" style="justify-content:center;margin-top:10px"><button class="btn" onclick="location.reload()">بررسی دوباره</button><button class="btn danger" id="out">خروج</button></div></div>`;
+    <div class="row" style="justify-content:center;margin-top:10px"><button class="btn" onclick="location.reload()">بررسی دوباره</button><button class="btn danger" id="out">خروج</button></div></div>
+    <div style="max-width:760px;margin:0 auto">${tariffHTML()}</div>`;
   $('#out').addEventListener('click', logout);
+}
+// جدول تعرفه‌ها برای مدیر بنگاه (و صفحه پایان اشتراک)
+function tariffHTML() {
+  const cur = TEN?.tier, sup = REG?.support || {};
+  const keys = ['silver', 'gold', 'platinum'];
+  const hist = (TEN?.history || []).slice(0, 10);
+  return `<div class="card stack" style="margin-top:12px"><h3>تعرفه اشتراک‌ها</h3>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:14px;text-align:center">
+      <tr><th style="text-align:right;padding:8px">سطح</th>${PAID.map(p => `<th style="padding:8px">${PLANS[p].name}</th>`).join('')}</tr>
+      ${keys.map(k => { const t = tierFull(k); return `<tr style="border-top:1px solid var(--line);${k === cur ? 'background:var(--sunk);font-weight:700' : ''}">
+        <td style="text-align:right;padding:8px">${esc(t.name)}${k === cur ? ' <span class="tag ok">سطح فعلی شما</span>' : ''}<div class="small muted" style="font-weight:400">دیوار: ${dailyTxt(t)}</div></td>
+        ${PAID.map(p => `<td style="padding:8px">${t.prices[p] ? tomanTxt(t.prices[p]) : '—'}</td>`).join('')}</tr>`; }).join('')}
+    </table></div>
+    <p class="small muted" style="margin:0">آگهی‌های دیوار فقط از محدوده‌ای که مدیر سامانه برای بنگاه شما تعیین کرده آورده می‌شود. برای افزودن محدوده دیگر، خرید یا تمدید اشتراک با پشتیبانی سامانه تماس بگیرید${sup.name ? ': ' + esc(sup.name) : ''}.</p>
+    ${sup.phone ? `<a class="btn primary" style="align-self:flex-start" href="tel:${esc(sup.phone)}">${I.phone} ${esc(faStr(sup.phone))}</a>` : ''}
+    ${hist.length ? `<details class="small"><summary style="cursor:pointer" class="muted">سابقه اشتراک شما</summary>${hist.map(h => `<div class="muted">${new Date(h.at).toLocaleDateString('fa-IR')} — ${PLANS[h.plan]?.name || fa(h.days) + ' روز'}${h.tier ? ' · ' + esc(tierFull(h.tier).name) : ''}</div>`).join('')}</details>` : ''}
+  </div>`;
 }
 async function logout() { if (WATCH.on) { const keep = wcfg().on; watchStop(); wsave({ on: keep }); } await DB.signOut(); S.me = null; invalidate(); go('sale'); }
 
@@ -1217,13 +1260,13 @@ async function viewPanel(tab, reuse) {
   const nAgents = admin ? (await DB.profiles()).filter(p => p.active && p.role === 'agent').length : 0;
   const newLeads = leads.filter(x => x.status === 'new').length;
   const tabs = [['listings', admin ? 'همه آگهی‌ها' : 'آگهی‌های من'], ...(DB.divarList ? [['divar', 'فایل‌های دیوار']] : []), ...(DB.caps.leads ? [['leads', `درخواست‌ها${newLeads ? ` (${fa(newLeads)})` : ''}`]] : []),
-    ...(admin ? [['agents', 'مشاوران'], ['designs', 'طراحی‌ها']] : []), ...(DB.isOwner?.() ? [['admins', 'مدیران']] : []), ...(DB.owner && DB.isOwner?.() ? [['agencies', 'بنگاه‌ها']] : []), ['me', 'حساب من']];
+    ...(admin ? [['agents', 'مشاوران'], ['designs', 'طراحی‌ها']] : []), ...(DB.isOwner?.() ? [['admins', 'مدیران']] : []), ...(DB.owner && DB.isOwner?.() ? [['agencies', 'بنگاه‌ها']] : []), ...(admin && TENANT !== 'main' ? [['plans', 'تعرفه‌ها']] : []), ['me', 'حساب من']];
   const sub = subState();
   view().innerHTML = `
     <div class="row" style="margin-bottom:12px"><h2 style="flex:1">${admin ? 'پنل مدیریت' : 'پنل مشاور'}</h2>
       <a class="btn primary" href="#edit/new">${I.plus} ثبت آگهی</a></div>
     <div id="mig"></div>
-    ${!sub.main ? `<div class="card small row" style="margin-bottom:12px;border-color:var(--${sub.days <= 5 ? 'warn' : 'line'})"><span style="flex:1">اشتراک <b>${esc(sub.tier.name)}</b> · ${sub.days <= 5 ? '⚠️ ' : ''}${fa(sub.days)} روز مانده (تا ${sub.exp.toLocaleDateString('fa-IR')})</span><span class="muted">دیوار: روزی ${fa(sub.tier.daily)} آگهی</span></div>` : ''}
+    ${!sub.main ? `<div class="card small row" style="margin-bottom:12px;border-color:var(--${sub.days <= 5 ? 'warn' : 'line'})"><span style="flex:1">${TEN?.trial ? '<span class="tag warn">آزمایشی</span> ' : ''}اشتراک <b>${esc(sub.tier.name)}</b>${PLANS[TEN?.plan] && !TEN?.trial ? ` (${PLANS[TEN.plan].short})` : ''} · ${sub.days <= 5 ? '⚠️ ' : ''}${fa(sub.days)} روز مانده (تا ${sub.exp.toLocaleDateString('fa-IR')})</span><span class="muted">دیوار: ${dailyTxt(sub.tier)}</span>${admin ? ' <a class="btn sm" href="#panel/plans">تعرفه‌ها و تمدید</a>' : ''}</div>` : ''}
     ${admin && DB.storage ? '<div id="stor"></div>' : ''}
     <div class="stats" style="margin-bottom:14px">
       <div class="stat"><small>آگهی فعال</small><b>${fa(mine.filter(l => l.status === 'active').length)}</b></div>
@@ -1246,6 +1289,7 @@ async function viewPanel(tab, reuse) {
   else if (tab === 'admins' && DB.isOwner?.()) await panelAdmins(pt, all);
   else if (tab === 'agencies' && DB.owner && DB.isOwner?.()) await panelAgencies(pt);
   else if (tab === 'designs' && admin) await panelDesigns(pt);
+  else if (tab === 'plans' && admin && TENANT !== 'main') pt.innerHTML = tariffHTML();
   else panelMe(pt);
 }
 
@@ -1340,7 +1384,7 @@ async function panelAgents(pt, all, leads) {
       <div class="small muted">${esc([p.email, faStr(p.phone)].filter(Boolean).join(' · '))}</div>
       <div class="small muted">${fa(n.length)} آگهی · ${fa(n.filter(l => l.status === 'active').length)} فعال${DB.caps.views ? ` · ${fa(n.reduce((s, l) => s + (l.views || 0), 0))} بازدید` : ''}${DB.caps.leads ? ` · ${fa(lc)} درخواست` : ''}</div>
       ${self ? '<div class="small">(شما)</div>' : `<div class="row" style="margin-top:4px">
-        ${!gh || DB.isOwner() ? `<select data-role="${p.id}" ${sel}>${opts(Object.entries(ROLES).filter(([k]) => !gh || k !== 'pending'), p.role)}</select>` : ''}
+        ${!gh || DB.isOwner() ? `<select data-role="${p.id}" ${sel}>${opts(Object.entries(ROLES).filter(([k]) => (!gh || k !== 'pending') && (TENANT === 'main' || k !== 'admin' || p.role === 'admin')), p.role)}</select>` : ''}
         <label class="check small"><input type="checkbox" data-act="${p.id}"${p.active ? ' checked' : ''}> فعال</label>
         ${p.role === 'pending' ? `<button class="btn sm primary" data-ok="${p.id}">تأیید به‌عنوان مشاور</button>` : ''}
         ${gh && p.active ? `<button class="btn sm" data-inv="${p.id}">رمز جدید و لینک دعوت</button>` : ''}</div>`}</div></div>`;
@@ -1406,7 +1450,7 @@ async function watchOnce() {
   if (!subState().ok) { watchStop(); throw new Error('اشتراک بنگاه فعال نیست'); }
   const tier = tierOf(), used = daily?.day === dayKey() ? daily.n : 0;
   if (used >= tier.daily) { WATCH.msg = `سهمیه امروز اشتراک ${tier.name} (${fa(tier.daily)} آگهی) پر شد؛ فردا ادامه می‌دهد`; return; }
-  if (!searches.length) throw new Error('اول یک «جستجوی آماده» دیوار ذخیره کنید (پایین همین صفحه)');
+  if (!searches.length) throw new Error(TENANT !== 'main' ? 'هنوز محدوده‌ای برای این بنگاه تعیین نشده؛ با پشتیبانی سامانه تماس بگیرید' : 'اول یک «جستجوی آماده» دیوار ذخیره کنید (پایین همین صفحه)');
   // هر آگهی‌ای که در نتیجه جستجو هست و هنوز در فهرست نیست (و دستی حذف نشده) اضافه می‌شود
   const known = new Set([...items.map(x => Divar.tokenOf(x.url)), ...ignore]);
   const fails = store.get(K('amlak-watch-fail'), {}), c = wcfg(), PER_TICK = 5;
@@ -1455,6 +1499,7 @@ function watchUI() {
 // «فایل‌های دیوار»: لینک آگهی‌هایی که کارمندان در دیوار پیدا می‌کنند؛ همه مشاوران و مدیرها می‌بینند
 async function panelDivar(pt) {
   const { items, searches } = await DB.divarList();
+  const canSearch = isAdmin() && TENANT === 'main';
   const lists = isAdmin() ? await loadListings(true) : [], agentsAll = isAdmin() ? await loadAgents() : [];
   const lOf = id => lists.find(l => l.id === id);
   const F = S.dvF || (S.dvF = { st: 'open' });
@@ -1481,9 +1526,10 @@ async function panelDivar(pt) {
       <textarea name="text" rows="2" placeholder="(اختیاری) متن آگهی را هم کپی کنید و اینجا بچسبانید تا مشخصات خودکار خوانده شود"></textarea>
       <input name="note" placeholder="یادداشت (اختیاری) مثلا: مالک شخصی است">
       <button class="btn primary">افزودن به فهرست</button></form>
-    ${searches.length || isAdmin() ? `<div class="card stack" style="margin-top:12px"><b>جستجوهای آماده در دیوار</b>
-      <div class="chips">${searches.map((x, i) => `<a class="chip" target="_blank" rel="noopener" href="${esc(x.url)}">${esc(x.name)}</a>${isAdmin() ? `<button class="chip" data-rs="${i}" aria-label="حذف" style="color:var(--bad)">×</button>` : ''}`).join('') || '<span class="small muted">هنوز جستجویی ذخیره نشده</span>'}</div>
-      ${isAdmin() ? `<form class="row" id="dss"><input name="name" placeholder="نام (مثلا: آپارتمان فروشی سعادت‌آباد)" style="flex:2;min-width:160px"><input name="url" placeholder="لینک جستجو در دیوار" dir="ltr" style="flex:3;min-width:160px"><button class="btn sm">ذخیره</button></form>
+    ${searches.length || isAdmin() ? `<div class="card stack" style="margin-top:12px"><b>${TENANT !== 'main' ? 'محدوده دیوار بنگاه شما' : 'جستجوهای آماده در دیوار'}</b>
+      <div class="chips">${searches.map((x, i) => `<a class="chip" target="_blank" rel="noopener" href="${esc(x.url)}">${esc(x.name)}</a>${canSearch ? `<button class="chip" data-rs="${i}" aria-label="حذف" style="color:var(--bad)">×</button>` : ''}`).join('') || `<span class="small muted">${TENANT !== 'main' ? 'هنوز محدوده‌ای برای بنگاه شما تعیین نشده؛ با پشتیبانی سامانه تماس بگیرید' : 'هنوز جستجویی ذخیره نشده'}</span>`}</div>
+      ${TENANT !== 'main' ? '<p class="small muted" style="margin:0">این محدوده را مدیر سامانه تعیین می‌کند و دیده‌بان فقط از همین‌ها آگهی می‌آورد. برای افزودن محدوده دیگر، تب «تعرفه‌ها» را ببینید.</p>' : ''}
+      ${canSearch ? `<form class="row" id="dss"><input name="name" placeholder="نام (مثلا: آپارتمان فروشی سعادت‌آباد)" style="flex:2;min-width:160px"><input name="url" placeholder="لینک جستجو در دیوار" dir="ltr" style="flex:3;min-width:160px"><button class="btn sm">ذخیره</button></form>
       <p class="small muted" style="margin:0">در دیوار فیلترها را بزنید (مثلا «آگهی‌دهنده: شخصی»)، لینک صفحه را کپی کنید و اینجا ذخیره کنید تا همه مشاوران با یک لمس باز کنند.</p>` : ''}</div>` : ''}
     <div class="row" style="margin:14px 0 8px"><h3 style="flex:1">فهرست (${fa(items.length)})</h3>
       <select id="dvs" ${sel}>${opts([['open', 'باز (جدید و تماس گرفته)'], ['all', 'همه'], ...Object.entries(DIVAR_ST).map(([k, v]) => [k, v[0]])], F.st)}</select></div>
