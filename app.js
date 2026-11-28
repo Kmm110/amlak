@@ -413,8 +413,13 @@ function GitHubDB() {
       async setTenantToken(slug, token) {
         guardOwner(); token = token.trim(); const x = REG.tenants[slug];
         for (const repo of [x.privateRepo, x.publicRepo]) { const r = await gh(`/repos/${repo}`, {}, token).catch(() => null); if (!r?.permissions?.push) throw new Error('این توکن به مخزن ' + repo.split('/')[1] + ' دسترسی نوشتن ندارد'); }
-        const leak = await gh(`/repos/${REG_REPO()}`, {}, token).catch(() => null);
-        if (leak?.permissions?.push) throw new Error('این توکن به مخزن‌های دیگر هم دسترسی دارد! فقط دو مخزن همین بنگاه را انتخاب کنید');
+        // «permissions» در پاسخ گیت‌هاب نقش صاحب حساب را نشان می‌دهد، نه محدوده توکن؛ پس آزمایش درست این است:
+        // توکنی که فقط دو مخزن این بنگاه را دارد، مخزن خصوصی مدیر اصلی را اصلا نمی‌بیند (۴۰۴).
+        const own = dev?.repo;
+        if (own && ![x.privateRepo, x.publicRepo].includes(own)) {
+          const leak = await gh(`/repos/${own}`, {}, token).then(() => true, () => false);
+          if (leak) throw new Error('این توکن به مخزن‌های دیگر هم دسترسی دارد! فقط دو مخزن همین بنگاه را انتخاب کنید');
+        }
         VAULT.tenants = { ...(VAULT.tenants || {}), [slug]: token }; await saveVault(VAULT);
       },
       // لینک دعوت مدیر بنگاه (رمز تازه برای او گذاشته می‌شود)
