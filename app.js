@@ -49,7 +49,8 @@ const bumpDays = (days, k) => { const keep = new Set(last7()), o = {}; for (cons
 // بسته‌های اشتراک (trial فقط موقع ساخت بنگاه)
 const PLANS = { trial: { name: 'آزمایشی ۷ روزه (رایگان)', short: 'آزمایشی', days: 7 }, m1: { name: 'یک ماهه', short: '۱ ماهه', days: 30 }, m3: { name: 'سه ماهه', short: '۳ ماهه', days: 90 },
   m6: { name: 'شش ماهه', short: '۶ ماهه', days: 180 }, m12: { name: 'یک ساله', short: '۱ ساله', days: 365 } };
-const PAID = ['m1', 'm3', 'm6', 'm12'];
+const PAID = ['m1', 'm3', 'm6', 'm12'];   // همه بسته‌های شناخته‌شده (برای سابقه)
+const SELL = ['m1'];   // بسته‌هایی که فعلا فروخته می‌شود: فقط یک ماهه
 const tierFull = k => { const d = DEF_TIERS[k] || DEF_TIERS.silver, r = REG?.tiers?.[k] || {}; return { ...d, ...r, prices: { ...d.prices, ...(r.prices || {}) } }; };
 const dailyTxt = t => lim(t.daily) === Infinity && lim(t.weekly) === Infinity ? 'نامحدود'
   : [lim(t.daily) !== Infinity && `روزی ${fa(t.daily)}`, lim(t.weekly) !== Infinity && `هفته‌ای حداکثر ${fa(t.weekly)}`].filter(Boolean).join('، ') + ' آگهی';
@@ -386,6 +387,29 @@ function GitHubDB() {
       async setActive(slug, on) { guardOwner(); await regMutate(r => { r.tenants[slug].active = !!on; }); },
       async setTier(slug, tier) { guardOwner(); await regMutate(r => { r.tenants[slug].tier = tier; }); },
       async setInfo(slug, info) { guardOwner(); await regMutate(r => { Object.assign(r.tenants[slug], info); }); },
+      /* CRM فقط برای مدیر اصلی: شماره مدیر، مشاوران و مالکان همه بنگاه‌ها (بنگاه خود شما + همه زیرمجموعه‌ها).
+         اطلاعات هر بنگاه از مخزن خصوصی خودش با توکن مدیر کل خوانده می‌شود و جایی ذخیره نمی‌شود. */
+      async crm() {
+        guardOwner(); await loadPriv();
+        const pick = (d, meta) => {
+          const st = d.staff || [], ls = d.listings || [], pv = d.priv || {}, boss = st.find(s => s.owner) || st.filter(s => s.role === 'admin').sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))[0];
+          const pOf = id => Array.isArray(pv) ? pv.find(p => p.listing_id === id) || {} : pv[id] || {};
+          return { ...meta,
+            boss: boss ? { name: boss.full_name, phone: boss.phone || '' } : null,
+            staff: st.filter(s => s.id !== boss?.id).map(s => ({ name: s.full_name, phone: s.phone || '', role: s.role, active: !!s.active })),
+            owners: ls.map(l => ({ l, p: pOf(l.id) })).filter(({ p }) => p.owner_phone || p.owner_name).map(({ l, p }) => ({
+              name: p.owner_name || '', phone: p.owner_phone || '', id: l.id, title: l.title || '', city: l.city || '', district: l.district || '', address: p.exact_address || '',
+              deal: l.deal, ptype: l.ptype, status: l.status, at: l.created_at })) };
+        };
+        const out = [pick(P, { slug: 'main', name: CFG.name || 'بنگاه شما', office: CFG.phone || '', mine: true })];
+        if (!VAULT?.master) { out[0].noMaster = true; return clone(out); }   // بدون «اتصال مدیریت کل» فقط بنگاه خود شما
+        const reg = (await regGet()).data;
+        for (const [slug, x] of Object.entries(reg.tenants || {})) {
+          try { out.push(pick(await tRead(x.privateRepo), { slug, name: x.name, office: x.phone || '' })); }
+          catch (e) { out.push({ slug, name: x.name, office: x.phone || '', error: e.message, boss: null, staff: [], owners: [] }); }
+        }
+        return clone(out);
+      },
       async stats(slug) {
         guardOwner(); const x = REG.tenants[slug], d = await tRead(x.privateRepo), today = dayKey();
         const st = d.staff || [], ls = d.listings || [], lastLog = (d.log || [])[0];
@@ -1303,10 +1327,10 @@ function tariffHTML() {
   const hist = (TEN?.history || []).slice(0, 10);
   return `<div class="card stack" style="margin-top:12px"><h3>تعرفه اشتراک‌ها</h3>
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:14px;text-align:center">
-      <tr><th style="text-align:right;padding:8px">سطح</th>${PAID.map(p => `<th style="padding:8px">${PLANS[p].name}</th>`).join('')}</tr>
+      <tr><th style="text-align:right;padding:8px">سطح</th>${SELL.map(p => `<th style="padding:8px">${PLANS[p].name}</th>`).join('')}</tr>
       ${keys.map(k => { const t = tierFull(k); return `<tr style="border-top:1px solid var(--line);${k === cur ? 'background:var(--sunk);font-weight:700' : ''}">
         <td style="text-align:right;padding:8px">${esc(t.name)}${k === cur ? ' <span class="tag ok">سطح فعلی شما</span>' : ''}<div class="small muted" style="font-weight:400">دیوار: ${dailyTxt(t)}</div></td>
-        ${PAID.map(p => `<td style="padding:8px">${t.prices[p] ? tomanTxt(t.prices[p]) : '—'}</td>`).join('')}</tr>`; }).join('')}
+        ${SELL.map(p => `<td style="padding:8px">${t.prices[p] ? tomanTxt(t.prices[p]) : '—'}</td>`).join('')}</tr>`; }).join('')}
     </table></div>
     <p class="small muted" style="margin:0">آگهی‌های دیوار فقط از محدوده‌ای که مدیر سامانه برای بنگاه شما تعیین کرده آورده می‌شود. برای افزودن محدوده دیگر، خرید یا تمدید اشتراک با پشتیبانی سامانه تماس بگیرید${sup.name ? ': ' + esc(sup.name) : ''}.</p>
     ${sup.phone ? `<a class="btn primary" style="align-self:flex-start" href="tel:${esc(sup.phone)}">${I.phone} ${esc(faStr(sup.phone))}</a>` : ''}
@@ -1328,7 +1352,7 @@ async function viewPanel(tab, reuse) {
   const nAgents = admin ? (await DB.profiles()).filter(p => p.active && p.role === 'agent').length : 0;
   const newLeads = leads.filter(x => x.status === 'new').length;
   const tabs = [['listings', admin ? 'همه آگهی‌ها' : 'آگهی‌های من'], ...(DB.divarList ? [['divar', 'فایل‌های دیوار']] : []), ...(DB.caps.leads ? [['leads', `درخواست‌ها${newLeads ? ` (${fa(newLeads)})` : ''}`]] : []),
-    ...(admin ? [['agents', 'مشاوران'], ['designs', 'طراحی‌ها']] : []), ...(DB.isOwner?.() ? [['admins', 'مدیران']] : []), ...(DB.owner && DB.isOwner?.() ? [['agencies', 'بنگاه‌ها']] : []), ...(admin && TENANT !== 'main' ? [['plans', 'تعرفه‌ها']] : []), ['me', 'حساب من']];
+    ...(admin ? [['agents', 'مشاوران'], ['designs', 'طراحی‌ها']] : []), ...(DB.isOwner?.() ? [['admins', 'مدیران']] : []), ...(DB.owner && DB.isOwner?.() ? [['agencies', 'بنگاه‌ها'], ['crm', 'CRM']] : []), ...(admin && TENANT !== 'main' ? [['plans', 'تعرفه‌ها']] : []), ['me', 'حساب من']];
   const sub = subState();
   view().innerHTML = `
     <div class="row" style="margin-bottom:12px"><h2 style="flex:1">${admin ? 'پنل مدیریت' : 'پنل مشاور'}</h2>
@@ -1356,6 +1380,7 @@ async function viewPanel(tab, reuse) {
   else if (tab === 'agents' && admin) await panelAgents(pt, all, leads);
   else if (tab === 'admins' && DB.isOwner?.()) await panelAdmins(pt, all);
   else if (tab === 'agencies' && DB.owner && DB.isOwner?.()) await panelAgencies(pt);
+  else if (tab === 'crm' && DB.owner && DB.isOwner?.()) await panelCRM(pt);
   else if (tab === 'designs' && admin) await panelDesigns(pt);
   else if (tab === 'plans' && admin && TENANT !== 'main') pt.innerHTML = tariffHTML();
   else panelMe(pt);

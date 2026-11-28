@@ -16,7 +16,7 @@ async function panelAgencies(pt) {
   const reg = await O.registry(); REG = reg;
   const tiers = Object.fromEntries(TIER_KEYS.map(k => [k, tierFull(k)]));
   const income = Object.values(reg.tenants || {}).reduce((s, x) => s + (x.history || []).reduce((a, h) => a + (+h.price || 0), 0), 0);
-  const planOpts = (withTrial) => opts([...(withTrial ? [['trial', PLANS.trial.name]] : []), ...PAID.map(p => [p, PLANS[p].name]), ...(withTrial ? [['', 'فعلا فعال نشود (بعدا تمدید می‌کنم)']] : [])], withTrial ? 'trial' : 'm1');
+  const planOpts = (withTrial) => opts([...(withTrial ? [['trial', PLANS.trial.name]] : []), ...SELL.map(p => [p, PLANS[p].name]), ...(withTrial ? [['', 'فعلا فعال نشود (بعدا تمدید می‌کنم)']] : [])], withTrial ? 'trial' : 'm1');
   // «اسم | لینک» در هر خط → [{name,url}]
   const parseSearches = txt => String(txt || '').split('\n').map(l => l.trim()).filter(Boolean).map(l => { const m = l.match(/(https:\/\/divar\.ir\/\S+)/); return m ? { name: l.replace(m[1], '').replace(/[|،,:-]+\s*$/, '').trim() || 'محدوده', url: m[1] } : null; }).filter(Boolean);
   const list = Object.entries(reg.tenants || {}).sort((a, b) => (b[1].created || '').localeCompare(a[1].created || ''));
@@ -77,7 +77,7 @@ async function panelAgencies(pt) {
           <label class="f"><span>آگهی دیوار در روز (۰ = نامحدود)</span><input name="${k}-daily" inputmode="numeric" value="${fa(tiers[k].daily || 0)}"></label>
           <label class="f"><span>سقف ۷ روز (۰ = نامحدود)</span><input name="${k}-weekly" inputmode="numeric" value="${fa(tiers[k].weekly || 0)}"></label>
           <label class="f"><span>سرعت دیده‌بان (ثانیه)</span><select name="${k}-every">${opts([5, 10, 20, 30, 60].map(x => [x, fa(x) + ' ثانیه']), tiers[k].every)}</select></label></div>
-          <div class="grid2">${PAID.map(p => `<label class="f"><span>${PLANS[p].name} (میلیون تومان)</span><input name="${k}-${p}" inputmode="decimal" value="${fa((tiers[k].prices[p] || 0) / 1e6)}"></label>`).join('')}</div></div>`).join('')}
+          <div class="grid2">${SELL.map(p => `<label class="f"><span>${PLANS[p].name} (میلیون تومان)</span><input name="${k}-${p}" inputmode="decimal" value="${fa((tiers[k].prices[p] || 0) / 1e6)}"></label>`).join('')}</div></div>`).join('')}
         <button class="btn">ذخیره سطح‌ها و قیمت‌ها</button></form></details>
     <details class="card" style="margin-top:12px"><summary style="cursor:pointer"><b>☎️ پشتیبانی</b> <span class="small muted">· به بنگاه‌هایی که اشتراکشان تمام شده نمایش داده می‌شود</span></summary>
       <form class="grid3" id="ag-sup" style="margin-top:10px"><input name="name" placeholder="نام (مثلا پشتیبانی سامانه)" value="${esc(reg.support?.name || '')}"><input name="phone" inputmode="tel" placeholder="شماره تماس" value="${esc(reg.support?.phone || '')}"><button class="btn">ذخیره</button></form></details>`;
@@ -140,7 +140,7 @@ async function panelAgencies(pt) {
   $('#ag-tiers').addEventListener('submit', e => {
     e.preventDefault(); const f = e.target;
     const t = Object.fromEntries(TIER_KEYS.map(k => [k, { name: f[k + '-name'].value.trim() || DEF_TIERS[k].name, daily: Math.max(0, toNum(f[k + '-daily'].value) || 0), weekly: Math.max(0, toNum(f[k + '-weekly'].value) || 0), every: +f[k + '-every'].value,
-      prices: Object.fromEntries(PAID.map(p => [p, Math.round(millions(f[k + '-' + p].value) * 1e6)])) }]));
+      prices: Object.fromEntries(SELL.map(p => [p, Math.round(millions(f[k + '-' + p].value) * 1e6)])) }]));
     act($('button', f), () => O.saveTiers(t), 'سطح‌ها ذخیره شد');
   });
   $('#ag-sup').addEventListener('submit', e => { e.preventDefault(); act($('button', e.target), () => O.saveSupport({ name: e.target.name.value.trim(), phone: e.target.phone.value.trim() }), 'ذخیره شد'); });
@@ -197,4 +197,76 @@ function agenciesConnect(pt) {
     try { await DB.owner.setMaster(e.target.tok.value, e.target.pw.value); toast('وصل شد ✓'); panelAgencies(pt); }
     catch (err) { toast(err.message, 6000); b.disabled = false; b.textContent = 'اتصال'; }
   });
+}
+
+/* ---------- CRM: فقط برای مدیر اصلی سامانه ----------
+   شماره مدیر اصلی هر بنگاه، مشاوران و مالکان ملک‌ها (با محله/شهر)، به‌تفکیک بنگاه. */
+async function panelCRM(pt) {
+  pt.innerHTML = '<div class="spin"></div><p class="small muted" style="text-align:center">در حال خواندن اطلاعات همه بنگاه‌ها…</p>';
+  let data;
+  try { try { await DB.owner.load(); } catch { } data = await DB.owner.crm(); }
+  catch (e) { pt.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const F = S.crmF || (S.crmF = { q: '', type: 'all', ag: '' });
+  const TYPES = [['all', 'همه'], ['boss', 'مدیران بنگاه'], ['staff', 'مشاوران'], ['owner', 'مالکان ملک']];
+  const n = k => data.reduce((s, a) => s + (k === 'boss' ? (a.boss ? 1 : 0) : a[k === 'staff' ? 'staff' : 'owners'].length), 0);
+  const norm = s => toEnDigits(String(s || '')).replace(/ي/g, 'ی').replace(/ك/g, 'ک').toLowerCase();
+  const tel = ph => ph ? `<a href="tel:${esc(toEnDigits(ph))}" dir="ltr">${esc(faStr(ph))}</a> · <a class="small" target="_blank" rel="noopener" href="https://wa.me/${esc(waPhone(ph))}">واتس‌اپ</a>` : '<span class="muted">بدون شماره</span>';
+  const linkOf = (a, id) => a.mine ? `#l/${id}` : siteOf(a.slug) + `#l/${id}`;
+  const rowsOf = a => [
+    ...(a.boss ? [{ type: 'boss', a, name: a.boss.name, phone: a.boss.phone }] : []),
+    ...a.staff.map(s => ({ type: 'staff', a, name: s.name, phone: s.phone, extra: s.role === 'admin' ? 'مدیر' : 'مشاور', off: !s.active })),
+    ...a.owners.map(o => ({ type: 'owner', a, name: o.name, phone: o.phone, o }))];
+  const match = r => (F.type === 'all' || F.type === r.type) && (!F.ag || F.ag === r.a.slug) &&
+    (!F.q || norm([r.name, r.phone, r.o?.district, r.o?.city, r.o?.title, r.a.name].join(' ')).includes(norm(F.q)));
+  pt.innerHTML = `
+    <p class="small muted" style="margin-top:0">🔒 این بخش فقط برای شما (مدیر اصلی سامانه) نمایش داده می‌شود. مدیران و مشاوران بنگاه‌ها آن را نمی‌بینند.</p>
+    ${data[0]?.noMaster ? '<div class="card small" style="border-color:var(--warn);margin-bottom:10px">⚠️ برای دیدن شماره‌های بنگاه‌های زیرمجموعه، اول در تب «بنگاه‌ها» «اتصال مدیریت کل» را انجام دهید. فعلا فقط بنگاه خود شما نمایش داده می‌شود.</div>' : ''}
+    <div class="stats" style="margin-bottom:12px">
+      <div class="stat"><small>بنگاه‌ها</small><b>${fa(data.length)}</b></div>
+      <div class="stat"><small>مدیران بنگاه</small><b>${fa(n('boss'))}</b></div>
+      <div class="stat"><small>مشاوران</small><b>${fa(n('staff'))}</b></div>
+      <div class="stat"><small>مالکان ملک</small><b>${fa(n('owner'))}</b></div></div>
+    <div class="card stack" style="margin-bottom:12px;position:sticky;top:0;z-index:5">
+      <input id="crq" placeholder="جستجو: نام، شماره، محله، شهر، عنوان آگهی…" value="${esc(F.q)}">
+      <div class="row" style="gap:6px;flex-wrap:wrap"><div class="chips" id="crt">${TYPES.map(([k, t]) => `<button class="chip${F.type === k ? ' on' : ''}" data-ty="${k}">${t}</button>`).join('')}</div>
+        <select id="crag" style="width:auto;min-height:32px;padding:3px 8px;font-size:13px"><option value="">همه بنگاه‌ها</option>${data.map(a => `<option value="${esc(a.slug)}"${F.ag === a.slug ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+        <span style="flex:1"></span><button class="btn sm" id="crx">⬇️ خروجی اکسل</button></div>
+      <div class="small muted" id="crn"></div></div>
+    <div id="crl"></div>`;
+  const draw = () => {
+    let total = 0;
+    $('#crl').innerHTML = data.map((a, i) => {
+      const rs = rowsOf(a).filter(match); total += rs.length;
+      if (!rs.length && (F.q || F.ag || F.type !== 'all')) return '';
+      const hue = HUES[i % HUES.length], sec = (ty, title) => { const r = rs.filter(x => x.type === ty); return r.length ? `<div class="stack" style="gap:4px"><b class="small">${title} (${fa(r.length)})</b>
+        ${r.map(x => `<div class="tr" style="padding:6px 8px;border-radius:10px;background:var(--card,#fff)"><div class="mid">
+          <b>${esc(x.name || '(بدون نام)')}</b>${x.extra ? ` <span class="tag">${x.extra}</span>` : ''}${x.off ? ' <span class="tag bad">غیرفعال</span>' : ''}
+          <div class="small">${tel(x.phone)}</div>
+          ${x.o ? `<div class="small muted">📍 ${esc([x.o.city, x.o.district].filter(Boolean).join('، ') || 'محله ثبت نشده')}${x.o.address ? ' — ' + esc(x.o.address) : ''}</div>
+            <div class="small muted">${esc([DEAL_NAME[x.o.deal], PTYPES[x.o.ptype]].filter(Boolean).join(' · '))} · <a href="${esc(linkOf(a, x.o.id))}" target="_blank" rel="noopener">آگهی کد ${fa(x.o.id)}</a> — ${esc(x.o.title)}${x.o.status === 'hidden' ? ' <span class="tag">پیش‌نویس</span>' : ''}</div>` : ''}
+        </div></div>`).join('')}</div>` : ''; };
+      return `<div class="card stack" style="border:2px solid hsl(${hue} 60% 45%);background:hsla(${hue},70%,50%,.07);margin-bottom:12px">
+        <div style="height:6px;border-radius:6px;background:hsl(${hue} 60% 45%);margin:-4px 0 2px"></div>
+        <div class="row"><b style="flex:1;font-size:16px">${esc(a.name)}${a.mine ? ' <span class="tag ok">بنگاه شما</span>' : ''}</b>${a.office ? `<span class="small">دفتر: ${tel(a.office)}</span>` : ''}</div>
+        ${a.error ? `<div class="small" style="color:var(--bad)">اطلاعات این بنگاه خوانده نشد: ${esc(a.error)}</div>` : ''}
+        ${sec('boss', '👔 مدیر اصلی بنگاه')}${sec('staff', '👥 مشاوران')}${sec('owner', '🏠 مالکان ملک')}
+        ${rs.length ? '' : '<div class="small muted">هنوز شماره‌ای ثبت نشده</div>'}</div>`;
+    }).join('') || '<div class="empty">موردی پیدا نشد.</div>';
+    $('#crn').textContent = `${fa(total)} شماره`;
+  };
+  $('#crq').addEventListener('input', e => { F.q = e.target.value; draw(); });
+  $$('#crt [data-ty]').forEach(b => b.addEventListener('click', () => { F.type = b.dataset.ty; $$('#crt [data-ty]').forEach(x => x.classList.toggle('on', x === b)); draw(); }));
+  $('#crag').addEventListener('change', e => { F.ag = e.target.value; draw(); });
+  $('#crx').addEventListener('click', () => {
+    const TN = { boss: 'مدیر بنگاه', staff: 'مشاور', owner: 'مالک' };
+    const rows = data.flatMap(rowsOf).filter(match).map(r => [r.a.name, TN[r.type], r.name, toEnDigits(r.phone || ''), r.o?.city || '', r.o?.district || '', r.o?.address || '',
+      r.o ? [DEAL_NAME[r.o.deal], PTYPES[r.o.ptype]].filter(Boolean).join(' ') : '', r.o?.id || '', r.o?.title || '']);
+    const head = ['بنگاه', 'نوع', 'نام', 'شماره', 'شهر', 'محله', 'آدرس', 'معامله', 'کد آگهی', 'عنوان آگهی'];
+    const csv = '﻿' + [head, ...rows].map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    link.download = `CRM-${dayKey()}.csv`; document.body.append(link); link.click();
+    setTimeout(() => { URL.revokeObjectURL(link.href); link.parentNode?.removeChild(link); }, 1000);
+    toast(`${fa(rows.length)} ردیف در فایل اکسل ذخیره شد`);
+  });
+  draw();
 }
